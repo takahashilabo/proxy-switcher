@@ -88,59 +88,46 @@ struct ProxyManager {
     }
 
     /// Apply the given profile (or turn proxies off if nil) to the Wi-Fi service.
+    ///
+    /// On macOS, `networksetup` proxy changes do **not** require root for an
+    /// admin user, so the commands are run directly — no password prompt.
     func apply(profile: ProxyProfile?, interface: String?) throws {
         guard let service = wifiServiceName(for: interface) else {
             throw ApplyError.noService
         }
-        let cmds = commands(for: profile, service: service)
-        let script = cmds.map { args in
-            ([networksetup] + args).map(Self.shellQuote).joined(separator: " ")
-        }.joined(separator: " && ")
-
-        try runAdmin(shellScript: script)
+        for args in commands(for: profile, service: service) {
+            let result = run(networksetup, args)
+            if result.status != 0 {
+                let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw ApplyError.command("networksetup \(args.first ?? "") failed: \(detail)")
+            }
+        }
     }
 
     // MARK: - Shell helpers
 
-    private static func shellQuote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    @discardableResult
+    private func runCapture(_ launchPath: String, _ args: [String]) -> String? {
+        let r = run(launchPath, args)
+        return r.status == 0 ? r.output : nil
     }
 
-    /// Run a shell command and capture stdout (no privilege escalation).
-    private func runCapture(_ launchPath: String, _ args: [String]) -> String? {
+    /// Run a command, returning its exit status and combined stdout+stderr.
+    private func run(_ launchPath: String, _ args: [String]) -> (status: Int32, output: String) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
         proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = Pipe()
+        proc.standardError = pipe
         do {
             try proc.run()
-            proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)
+            proc.waitUntilExit()
+            let out = String(data: data, encoding: .utf8) ?? ""
+            return (proc.terminationStatus, out)
         } catch {
-            return nil
-        }
-    }
-
-    /// Run a shell script with administrator privileges via AppleScript.
-    /// Throws if the user cancels the auth prompt or a command fails.
-    private func runAdmin(shellScript: String) throws {
-        // Escape for embedding inside an AppleScript string literal.
-        let escaped = shellScript
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let apple = "do shell script \"\(escaped)\" with administrator privileges"
-
-        var errorInfo: NSDictionary?
-        guard let script = NSAppleScript(source: apple) else {
-            throw ApplyError.command("Could not build AppleScript.")
-        }
-        script.executeAndReturnError(&errorInfo)
-        if let errorInfo {
-            let msg = (errorInfo[NSAppleScript.errorMessage] as? String) ?? "Unknown error"
-            throw ApplyError.command(msg)
+            return (-1, "\(error)")
         }
     }
 }

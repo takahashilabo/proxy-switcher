@@ -13,7 +13,7 @@ This fills the gap in macOS, which has no built-in "per-SSID proxy" feature.
 - 🌐 Lives in the menu bar (no Dock icon)
 - 📡 Detects Wi-Fi changes instantly (CoreWLAN events + safety-net poll)
 - 🧩 Per-SSID rules: **Off / HTTP / HTTPS / SOCKS / PAC (auto)**, with optional auth
-- ⚙️ Applies settings via `networksetup` (asks for admin password when changing)
+- ⚙️ Applies settings via `networksetup` — **no password prompts** (proxy changes don't need root for an admin user)
 - 🚀 Optional **Launch at Login**
 - 💾 Rules saved as JSON in `~/Library/Application Support/ProxySwitcher/profiles.json`
 
@@ -44,22 +44,14 @@ Dock icon and won't have the Info.plist permissions, but it's handy for testing)
 4. Done. When you join that network the proxy is applied automatically; on any
    network without a rule, the proxy is turned **off**.
 
-## A note on the admin password
+## No password prompts
 
-Changing system proxy settings requires administrator rights, so macOS asks for
-your password each time the proxy actually changes (which is only when the SSID
-changes — not on every poll).
+Changing the proxy for a network *service* with `networksetup` does **not**
+require root for an admin user, so the app applies settings silently — you'll
+never be asked for a password when the network changes.
 
-If you'd rather not be prompted, allow `networksetup` to run without a password
-by adding a sudoers rule (advanced, optional):
-
-```bash
-echo "$(whoami) ALL=(root) NOPASSWD: /usr/sbin/networksetup" | sudo tee /etc/sudoers.d/proxyswitcher
-sudo chmod 440 /etc/sudoers.d/proxyswitcher
-```
-
-…and change `runAdmin` in `ProxyManager.swift` to call
-`sudo -n /usr/sbin/networksetup …` instead of the AppleScript prompt.
+The only permission prompt is the one-time **Location** access on first run
+(needed to read the Wi-Fi name).
 
 ## Project layout
 
