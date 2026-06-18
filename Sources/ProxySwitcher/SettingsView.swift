@@ -8,7 +8,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                ForEach($model.profiles) { $p in
+                ForEach(model.profiles) { p in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(p.ssid.isEmpty ? "(new rule)" : p.ssid)
                             .font(.headline)
@@ -18,12 +18,20 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .tag(p.id)
+                    .contextMenu {
+                        Button("Delete", role: .destructive) { remove(id: p.id) }
+                    }
+                }
+                .onDelete { offsets in
+                    let ids = offsets.map { model.profiles[$0].id }
+                    ids.forEach { remove(id: $0) }
                 }
                 .onMove { from, to in
                     model.profiles.move(fromOffsets: from, toOffset: to)
                     model.saveProfiles()
                 }
             }
+            .onDeleteCommand(perform: removeSelected)
             .frame(minWidth: 220)
             .safeAreaInset(edge: .bottom) {
                 HStack {
@@ -67,8 +75,12 @@ struct SettingsView: View {
 
     private func removeSelected() {
         guard let id = selection else { return }
+        remove(id: id)
+    }
+
+    private func remove(id: ProxyProfile.ID) {
         model.profiles.removeAll { $0.id == id }
-        selection = nil
+        if selection == id { selection = nil }
         model.saveProfiles()
     }
 }
