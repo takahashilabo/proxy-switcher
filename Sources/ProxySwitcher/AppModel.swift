@@ -17,6 +17,7 @@ final class AppModel: NSObject, ObservableObject {
     private let monitor = WiFiMonitor()
     private let proxy = ProxyManager()
     private let location = CLLocationManager()
+    private let envWriter = ShellEnvWriter()
 
     /// The SSID we last applied settings for, so we don't re-apply (and re-prompt
     /// for admin) on every poll tick.
@@ -92,9 +93,12 @@ final class AppModel: NSObject, ObservableObject {
         statusLine = "Applying \(match?.summary ?? "Off") for \(netLabel)…"
 
         let proxy = self.proxy
+        let envWriter = self.envWriter
         Task.detached(priority: .userInitiated) {
             do {
                 try proxy.apply(profile: match, interface: iface)
+                // Keep CLI tools (curl/git/npm…) in sync via a sourceable file.
+                envWriter.write(profile: match, ssid: ssid)
                 await MainActor.run {
                     guard generation == self.applyGeneration else { return }
                     if let match {
