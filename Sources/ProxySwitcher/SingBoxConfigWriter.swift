@@ -1,0 +1,91 @@
+import Foundation
+
+/// Generates a sing-box config that builds a TUN tunnel forwarding *all* system
+/// traffic to the rule's proxy. Used for apps that ignore the system proxy.
+///
+/// The helper script (`/usr/local/bin/proxy-tunnel`) runs sing-box as root with
+/// the file this writer produces.
+struct SingBoxConfigWriter {
+    private let fileURL: URL
+
+    init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".config/sing-box", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Must match CONF in install_tunnel_helper.sh.
+        self.fileURL = dir.appendingPathComponent("proxy-switcher.json")
+    }
+
+    var path: String { fileURL.path }
+
+    /// True if this profile can be tunneled (SOCKS or HTTP upstream).
+    static func supportsTunnel(_ p: ProxyProfile) -> Bool {
+        p.enabled && (p.type == .socks || p.type == .http || p.type == .https)
+    }
+
+    /// Write the config for the given profile. Returns false if not tunnelable.
+    @discardableResult
+    func write(profile: ProxyProfile) -> Bool {
+        guard Self.supportsTunnel(profile) else { return false }
+
+        var outbound: [String: Any] = [
+            "type": profile.type == .socks ? "socks" : "http",
+            "tag": "proxy",
+            "server": profile.host,
+            "server_port": profile.port,
+        ]
+        if profile.type == .socks { outbound["version"] = "5" }
+        if !profile.username.isEmpty {
+            outbound["username"] = profile.username
+            outbound["password"] = profile.password
+        }
+
+        var routeRules: [[String: Any]] = [["action": "sniff"]]
+        // Reach the proxy server itself directly (avoid a routing loop). Only
+        // valid as a CIDR when the host is a literal IPv4 address.
+        if isIPv4(profile.host) {
+            routeRules.append(["ip_cidr": ["\(profile.host)/32"], "outbound": "direct"])
+        }
+
+        let config: [String: Any] = [
+            "log": ["level": "info", "timestamp": true],
+            "dns": [
+                "servers": [
+                    ["tag": "remote", "type": "tcp", "server": "1.1.1.1", "detour": "proxy"]
+                ],
+                "final": "remote",
+                "strategy": "ipv4_only",
+            ],
+            "inbounds": [[
+                "type": "tun",
+                "tag": "tun-in",
+                "address": ["172.18.0.1/30"],
+                "auto_route": true,
+                "strict_route": true,
+                "stack": "gvisor",
+            ]],
+            "outbounds": [
+                outbound,
+                ["type": "direct", "tag": "direct"],
+            ],
+            "route": [
+                "rules": routeRules,
+                "final": "proxy",
+                "auto_detect_interface": true,
+            ],
+        ]
+
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: config,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return false }
+        try? data.write(to: fileURL, options: .atomic)
+        return true
+    }
+
+    private func isIPv4(_ s: String) -> Bool {
+        let parts = s.split(separator: ".")
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { Int($0).map { $0 >= 0 && $0 <= 255 } ?? false }
+    }
+}

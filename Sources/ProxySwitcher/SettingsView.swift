@@ -120,6 +120,15 @@ private struct ProfileEditor: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if profile.type == .socks || profile.type == .http || profile.type == .https {
+                Section("Full tunnel (advanced)") {
+                    Toggle("Route ALL apps through proxy (TUN tunnel)", isOn: $profile.useTunnel)
+                    Text("Forces every app — even ones that ignore the system proxy, like LINE — through the proxy using sing-box. Requires a one-time install: `sudo ./install_tunnel_helper.sh`. Needs admin to set up the virtual network.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .onChange(of: profile) { _, _ in onChange() }

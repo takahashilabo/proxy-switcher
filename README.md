@@ -86,6 +86,44 @@ Notes:
   (e.g. `ProxyCommand nc -X 5 -x host:port %h %p`) to `~/.ssh/config`.
 - PAC-type rules can't be expressed as env vars, so the file leaves them unset.
 
+## Full tunnel mode (for apps that ignore the proxy, e.g. LINE)
+
+The macOS system SOCKS proxy is *opt-in*: only apps that consult the proxy
+config (Safari, Chrome, Slack, Apple Music, …) use it. Apps that open raw
+sockets — **LINE** is one — bypass it and fail on a SOCKS-only tethering link.
+
+"Full tunnel" mode fixes this by creating a TUN virtual interface with
+[`sing-box`](https://sing-box.sagernet.org/) that forces **all** traffic
+(every app) through the proxy, including DNS.
+
+### Setup (one time)
+
+```bash
+brew install sing-box          # if not already installed
+sudo ./install_tunnel_helper.sh
+```
+
+This installs a tiny root helper (`/usr/local/bin/proxy-tunnel`) and a sudoers
+rule so the app can start/stop the tunnel **without a password**.
+
+### Use
+
+In **Settings**, open a SOCKS/HTTP rule and turn on
+**"Route ALL apps through proxy (TUN tunnel)"**. From then on:
+
+- Join that SSID → proxy is set **and** the tunnel starts → LINE etc. work.
+- Leave it (or quit the app) → the tunnel stops automatically and routing is
+  restored.
+
+The app writes the sing-box config to `~/.config/sing-box/proxy-switcher.json`
+based on the rule's host/port.
+
+Notes:
+- TUN needs root, which is why the one-time helper/sudoers install exists.
+- TCP works (messaging, login). UDP (e.g. LINE voice/video calls) only works if
+  the upstream proxy supports SOCKS5 UDP — many tethering proxies don't.
+- Uninstall: `sudo rm /usr/local/bin/proxy-tunnel /etc/sudoers.d/proxy-switcher-tunnel`
+
 ## Project layout
 
 ```
@@ -98,7 +136,10 @@ Sources/ProxySwitcher/
   ProxyManager.swift          # networksetup command builder + admin exec
   ProfileStore.swift          # JSON persistence
   ShellEnvWriter.swift        # writes ~/.config/proxy-switcher/env.sh for CLIs
+  SingBoxConfigWriter.swift   # generates the sing-box TUN config
+  TunnelManager.swift         # start/stop tunnel via the root helper
   Models.swift                # ProxyProfile / ProxyType
+install_tunnel_helper.sh      # one-time root helper + sudoers install
   MenuView.swift              # menu bar dropdown
   SettingsView.swift          # rule editor window
 sample_profiles.json          # example rules

@@ -18,6 +18,8 @@ final class AppModel: NSObject, ObservableObject {
     private let proxy = ProxyManager()
     private let location = CLLocationManager()
     private let envWriter = ShellEnvWriter()
+    private let singbox = SingBoxConfigWriter()
+    private let tunnel = TunnelManager()
 
     /// The SSID we last applied settings for, so we don't re-apply (and re-prompt
     /// for admin) on every poll tick.
@@ -42,6 +44,14 @@ final class AppModel: NSObject, ObservableObject {
 
         // Reading the SSID requires Location permission on modern macOS.
         location.requestWhenInUseAuthorization()
+
+        // Tear down the tunnel on quit so connectivity isn't stranded.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { [tunnel] _ in
+            try? tunnel.stop()
+        }
 
         // Initial evaluation.
         handleSSID(monitor.currentSSID())
@@ -94,19 +104,34 @@ final class AppModel: NSObject, ObservableObject {
 
         let proxy = self.proxy
         let envWriter = self.envWriter
+        let singbox = self.singbox
+        let tunnel = self.tunnel
+        let wantTunnel = (match.map { $0.useTunnel && SingBoxConfigWriter.supportsTunnel($0) }) ?? false
         Task.detached(priority: .userInitiated) {
             do {
                 try proxy.apply(profile: match, interface: iface)
                 // Keep CLI tools (curl/git/npm…) in sync via a sourceable file.
                 envWriter.write(profile: match, ssid: ssid)
+
+                // Full-tunnel mode for apps that ignore the system proxy.
+                var tunnelNote = ""
+                if wantTunnel, let m = match {
+                    singbox.write(profile: m)
+                    do { try tunnel.start() }
+                    catch { tunnelNote = " (tunnel: \(error))" }
+                } else {
+                    try? tunnel.stop()
+                }
+
+                let note = tunnelNote
                 await MainActor.run {
                     guard generation == self.applyGeneration else { return }
                     if let match {
-                        self.statusLine = "\(netLabel): \(match.summary)"
+                        self.statusLine = "\(netLabel): \(match.summary)\(wantTunnel ? " +tunnel" : "")\(note)"
                     } else {
                         self.statusLine = "\(netLabel): proxy off"
                     }
-                    self.lastError = nil
+                    self.lastError = note.isEmpty ? nil : String(note.dropFirst())
                 }
             } catch {
                 await MainActor.run {

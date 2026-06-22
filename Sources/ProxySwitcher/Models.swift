@@ -41,6 +41,27 @@ struct ProxyProfile: Codable, Identifiable, Equatable {
     var password: String = ""
     /// If false the rule is ignored (network falls back to "Off").
     var enabled: Bool = true
+    /// Route *all* traffic through the proxy via a TUN tunnel (sing-box), so
+    /// even apps that ignore the system proxy (e.g. LINE) work. SOCKS/HTTP only.
+    var useTunnel: Bool = false
+
+    init() {}
+
+    /// Tolerant decoding so older profiles.json files (missing newer fields)
+    /// still load, falling back to sensible defaults.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id        = try c.decodeIfPresent(UUID.self,      forKey: .id)        ?? UUID()
+        ssid      = try c.decodeIfPresent(String.self,    forKey: .ssid)      ?? ""
+        type      = try c.decodeIfPresent(ProxyType.self, forKey: .type)      ?? .socks
+        host      = try c.decodeIfPresent(String.self,    forKey: .host)      ?? ""
+        port      = try c.decodeIfPresent(Int.self,       forKey: .port)      ?? 8080
+        pacURL    = try c.decodeIfPresent(String.self,    forKey: .pacURL)    ?? ""
+        username  = try c.decodeIfPresent(String.self,    forKey: .username)  ?? ""
+        password  = try c.decodeIfPresent(String.self,    forKey: .password)  ?? ""
+        enabled   = try c.decodeIfPresent(Bool.self,      forKey: .enabled)   ?? true
+        useTunnel = try c.decodeIfPresent(Bool.self,      forKey: .useTunnel) ?? false
+    }
 
     /// A short human-readable summary of what this profile does.
     var summary: String {
