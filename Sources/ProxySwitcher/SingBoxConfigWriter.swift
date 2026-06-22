@@ -40,7 +40,13 @@ struct SingBoxConfigWriter {
             outbound["password"] = profile.password
         }
 
-        var routeRules: [[String: Any]] = [["action": "sniff"]]
+        var routeRules: [[String: Any]] = [
+            ["action": "sniff"],
+            // Capture DNS and resolve it through the proxy over TCP. Many
+            // tethering SOCKS proxies don't pass UDP, so plain UDP/53 fails —
+            // hijacking sends lookups to sing-box's DNS (TCP via the proxy).
+            ["protocol": "dns", "action": "hijack-dns"],
+        ]
         // Reach the proxy server itself directly (avoid a routing loop). Only
         // valid as a CIDR when the host is a literal IPv4 address.
         if isIPv4(profile.host) {
