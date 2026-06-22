@@ -60,6 +60,22 @@ tethering link they can't reach the network. Use **Full tunnel mode** (below) â€
 it routes every process, including terminals, through the proxy. (An earlier
 approach that exported proxy env vars was removed; the tunnel supersedes it.)
 
+### The `claude` CLI (special-cased)
+
+Claude Code streams long responses, which can stall through the TUN tunnel, so
+it gets its own lighter path: a shell wrapper that detects NetShare and points
+`claude` straight at NetShare's HTTP proxy (Claude Code honours `HTTPS_PROXY`).
+It needs no tunnel and falls back to running normally on other networks.
+
+Install (once):
+
+```sh
+echo '[ -f ~/.config/proxy-switcher/claude-netshare.sh ] && source ~/.config/proxy-switcher/claude-netshare.sh' >> ~/.zshrc
+```
+
+(`claude-netshare.sh` lives in `~/.config/proxy-switcher/`.) Open a new terminal
+and `claude` just works on NetShare or anywhere else.
+
 ## Full tunnel mode (for apps that ignore the proxy, e.g. LINE)
 
 The macOS system SOCKS proxy is *opt-in*: only apps that consult the proxy
@@ -91,6 +107,15 @@ In **Settings**, open a SOCKS/HTTP rule and turn on
 
 The app writes the sing-box config to `~/.config/sing-box/proxy-switcher.json`
 based on the rule's host/port.
+
+### Safety watchdog
+
+A full tunnel routes *everything* through the proxy, so if you leave the
+tethering network and the SSID change isn't detected, the machine could be left
+with no connectivity. To prevent this, the app probes the internet every ~10s
+while the tunnel is up; after a couple of consecutive failures it automatically
+stops the tunnel and clears the proxy, restoring the direct route. It re-engages
+on its own once a working network is back.
 
 Notes:
 - TUN needs root, which is why the one-time helper/sudoers install exists.

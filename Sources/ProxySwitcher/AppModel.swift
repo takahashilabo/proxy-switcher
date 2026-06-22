@@ -25,6 +25,16 @@ final class AppModel: NSObject, ObservableObject {
     private var lastAppliedSSID: String??  = .none
     private var applyGeneration = 0
 
+    // MARK: Tunnel watchdog state
+    /// Whether we currently have the TUN tunnel running.
+    private var tunnelStarted = false
+    /// Consecutive failed connectivity probes while the tunnel is up.
+    private var probeFailures = 0
+    /// Set when the watchdog has emergency-stopped the tunnel because the network
+    /// went away. Prevents restarting it until real connectivity returns.
+    private var backedOff = false
+    private var watchdog: Timer?
+
     var profilesPath: String { store.path }
 
     override init() {
@@ -54,6 +64,83 @@ final class AppModel: NSObject, ObservableObject {
 
         // Initial evaluation.
         handleSSID(monitor.currentSSID())
+
+        // Safety watchdog: if the tunnel is up but the internet is gone (e.g. we
+        // left the tethering network without the SSID change being detected),
+        // stop the tunnel so the machine isn't stranded with no connectivity.
+        let w = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.watchdogTick() }
+        }
+        RunLoop.main.add(w, forMode: .common)
+        watchdog = w
+    }
+
+    // MARK: - Tunnel watchdog
+
+    private func watchdogTick() {
+        // While backed off, keep probing; once the internet is back, re-evaluate.
+        if backedOff {
+            Task.detached {
+                let ok = await Self.probeInternet()
+                await MainActor.run {
+                    guard self.backedOff, ok else { return }
+                    self.backedOff = false
+                    self.probeFailures = 0
+                    self.forceReapply()
+                }
+            }
+            return
+        }
+
+        guard tunnelStarted else { probeFailures = 0; return }
+        Task.detached {
+            let ok = await Self.probeInternet()
+            await MainActor.run {
+                guard self.tunnelStarted, !self.backedOff else { return }
+                if ok {
+                    self.probeFailures = 0
+                } else {
+                    self.probeFailures += 1
+                    if self.probeFailures >= 2 { self.emergencyStopTunnel() }
+                }
+            }
+        }
+    }
+
+    /// Stop the tunnel and clear the system proxy to restore direct connectivity.
+    private func emergencyStopTunnel() {
+        probeFailures = 0
+        tunnelStarted = false
+        backedOff = true
+        lastError = "接続が失われたためトンネルを自動停止しました"
+        statusLine = "tunnel auto-stopped (no connectivity)"
+        // Don't let normal apply re-engage until the network actually changes.
+        lastAppliedSSID = .some(currentSSID)
+        let tunnel = self.tunnel
+        let proxy = self.proxy
+        let iface = monitor.interfaceName
+        Task.detached {
+            try? tunnel.stop()
+            try? proxy.apply(profile: nil, interface: iface)
+        }
+    }
+
+    /// Quick reachability check (~4s). Returns true if the internet is reachable
+    /// over whatever the current routing is.
+    nonisolated private static func probeInternet() async -> Bool {
+        var req = URLRequest(url: URL(string: "http://captive.apple.com/hotspot-detect.html")!)
+        req.timeoutInterval = 4
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4
+        config.waitsForConnectivity = false
+        let session = URLSession(configuration: config)
+        do {
+            let (_, resp) = try await session.data(for: req)
+            return (resp as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
     }
 
     // MARK: - Profiles
@@ -91,6 +178,10 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     private func apply(forSSID ssid: String?) {
+        // A real (re)apply means the situation changed — clear any back-off.
+        backedOff = false
+        probeFailures = 0
+
         let match = profile(forSSID: ssid)
         let iface = monitor.interfaceName
         lastAppliedSSID = .some(ssid)
@@ -111,17 +202,21 @@ final class AppModel: NSObject, ObservableObject {
 
                 // Full-tunnel mode for apps that ignore the system proxy.
                 var tunnelNote = ""
+                var started = false
                 if wantTunnel, let m = match {
                     singbox.write(profile: m)
-                    do { try tunnel.start() }
+                    do { try tunnel.start(); started = true }
                     catch { tunnelNote = " (tunnel: \(error))" }
                 } else {
                     try? tunnel.stop()
                 }
 
                 let note = tunnelNote
+                let didStart = started
                 await MainActor.run {
                     guard generation == self.applyGeneration else { return }
+                    self.tunnelStarted = didStart
+                    self.probeFailures = 0
                     if let match {
                         self.statusLine = "\(netLabel): \(match.summary)\(wantTunnel ? " +tunnel" : "")\(note)"
                     } else {
