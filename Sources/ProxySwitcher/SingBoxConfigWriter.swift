@@ -46,6 +46,10 @@ struct SingBoxConfigWriter {
             // tethering SOCKS proxies don't pass UDP, so plain UDP/53 fails —
             // hijacking sends lookups to sing-box's DNS (TCP via the proxy).
             ["protocol": "dns", "action": "hijack-dns"],
+            // Reject QUIC (UDP/443). The SOCKS proxy can't relay UDP, so QUIC
+            // would silently hang; rejecting it makes apps (Apple Music, LINE,
+            // browsers) fall back to TCP/HTTPS, which does work through SOCKS.
+            ["network": "udp", "port": 443, "action": "reject"],
         ]
         // Reach the proxy server itself directly (avoid a routing loop). Only
         // valid as a CIDR when the host is a literal IPv4 address.
@@ -68,6 +72,10 @@ struct SingBoxConfigWriter {
                 "address": ["172.18.0.1/30"],
                 "auto_route": true,
                 "strict_route": true,
+                // Small MTU avoids PMTU blackholes over a tethered proxy link,
+                // which otherwise stall large/streaming transfers (Apple Music,
+                // Claude streaming, LINE media) while small requests still work.
+                "mtu": 1280,
                 "stack": "gvisor",
             ]],
             "outbounds": [
