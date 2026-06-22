@@ -55,36 +55,10 @@ The only permission prompt is the one-time **Location** access on first run
 
 ## CLI tools (curl / git / npm …)
 
-GUI apps read the macOS system proxy, but most command-line tools ignore it and
-look at environment variables instead. So on a tethering/SOCKS network, browsers
-work while `curl`, `git`, `npm`, etc. fail (they try to connect directly and
-there's no direct route).
-
-To keep them in sync, the app writes a sourceable snippet whenever the proxy
-changes:
-
-```
-~/.config/proxy-switcher/env.sh
-```
-
-Source it from your shell (add once to `~/.zshrc`):
-
-```sh
-[ -f ~/.config/proxy-switcher/env.sh ] && source ~/.config/proxy-switcher/env.sh
-```
-
-Now every **new** terminal automatically gets the right proxy: on a SOCKS
-network it exports `ALL_PROXY/HTTP_PROXY/HTTPS_PROXY=socks5h://host:port` (plus
-lowercase variants and a sensible `NO_PROXY`); on a network with no rule it
-unsets them. `socks5h` resolves DNS at the proxy, which is what you want for
-tethering.
-
-Notes:
-- Already-open shells won't update until you open a new one (or re-source the
-  file). For live updates you can add a `precmd` hook that re-sources it.
-- `wget` doesn't support SOCKS; use `curl`. For `ssh`, add a `ProxyCommand`
-  (e.g. `ProxyCommand nc -X 5 -x host:port %h %p`) to `~/.ssh/config`.
-- PAC-type rules can't be expressed as env vars, so the file leaves them unset.
+Most command-line tools ignore the macOS system proxy, so on a SOCKS-only
+tethering link they can't reach the network. Use **Full tunnel mode** (below) —
+it routes every process, including terminals, through the proxy. (An earlier
+approach that exported proxy env vars was removed; the tunnel supersedes it.)
 
 ## Full tunnel mode (for apps that ignore the proxy, e.g. LINE)
 
@@ -135,7 +109,6 @@ Sources/ProxySwitcher/
   WiFiMonitor.swift           # CoreWLAN SSID change detection
   ProxyManager.swift          # networksetup command builder + admin exec
   ProfileStore.swift          # JSON persistence
-  ShellEnvWriter.swift        # writes ~/.config/proxy-switcher/env.sh for CLIs
   SingBoxConfigWriter.swift   # generates the sing-box TUN config
   TunnelManager.swift         # start/stop tunnel via the root helper
   Models.swift                # ProxyProfile / ProxyType

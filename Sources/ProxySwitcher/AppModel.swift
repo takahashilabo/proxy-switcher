@@ -17,7 +17,6 @@ final class AppModel: NSObject, ObservableObject {
     private let monitor = WiFiMonitor()
     private let proxy = ProxyManager()
     private let location = CLLocationManager()
-    private let envWriter = ShellEnvWriter()
     private let singbox = SingBoxConfigWriter()
     private let tunnel = TunnelManager()
 
@@ -103,15 +102,12 @@ final class AppModel: NSObject, ObservableObject {
         statusLine = "Applying \(match?.summary ?? "Off") for \(netLabel)…"
 
         let proxy = self.proxy
-        let envWriter = self.envWriter
         let singbox = self.singbox
         let tunnel = self.tunnel
         let wantTunnel = (match.map { $0.useTunnel && SingBoxConfigWriter.supportsTunnel($0) }) ?? false
         Task.detached(priority: .userInitiated) {
             do {
                 try proxy.apply(profile: match, interface: iface)
-                // Keep CLI tools (curl/git/npm…) in sync via a sourceable file.
-                envWriter.write(profile: match, ssid: ssid)
 
                 // Full-tunnel mode for apps that ignore the system proxy.
                 var tunnelNote = ""
