@@ -11,6 +11,9 @@ struct MenuView: View {
 
         if let ssid = model.currentSSID {
             Text("Wi-Fi: \(ssid)")
+        } else if let m = model.activeProfile {
+            // SSID unreadable, but we matched a rule by reaching its proxy.
+            Text("Wi-Fi: (name unavailable) — matched \(m.ssid) by reachability")
         } else if !model.locationAuthorized {
             Text("⚠︎ Location permission needed to read Wi-Fi name")
         } else {

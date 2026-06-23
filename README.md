@@ -12,6 +12,8 @@ This fills the gap in macOS, which has no built-in "per-SSID proxy" feature.
 
 - 🌐 Lives in the menu bar (no Dock icon)
 - 📡 Detects Wi-Fi changes instantly (CoreWLAN events + safety-net poll)
+- 🎯 Matches rules by **SSID or by proxy reachability** — a tethering rule
+  engages even when macOS won't reveal the Wi-Fi name (see below)
 - 🧩 Per-SSID rules: **Off / HTTP / HTTPS / SOCKS / PAC (auto)**, with optional auth
 - ⚙️ Applies settings via `networksetup` — **no password prompts** (proxy changes don't need root for an admin user)
 - 🚀 Optional **Launch at Login**
@@ -108,14 +110,25 @@ In **Settings**, open a SOCKS/HTTP rule and turn on
 The app writes the sing-box config to `~/.config/sing-box/proxy-switcher.json`
 based on the rule's host/port.
 
+### Matching by reachability (why auto-switching is reliable)
+
+macOS increasingly refuses to hand apps the Wi-Fi name (it needs Location
+permission, and tethering SSIDs like `DIRECT-xx-…` vary), which is the usual
+reason a pure "match by SSID" switcher silently does nothing. To be robust, a
+rule **also** matches when its proxy endpoint is directly reachable on the LAN:
+the app opens a quick TCP probe to the rule's `host:port` (e.g. NetShare's fixed
+`192.168.49.1:8282`). If it answers, you're on that network — regardless of the
+SSID — and the rule engages. This is the same trick the `claude` wrapper uses.
+
 ### Safety watchdog
 
-A full tunnel routes *everything* through the proxy, so if you leave the
-tethering network and the SSID change isn't detected, the machine could be left
-with no connectivity. To prevent this, the app probes the internet every ~10s
-while the tunnel is up; after a couple of consecutive failures it automatically
-stops the tunnel and clears the proxy, restoring the direct route. It re-engages
-on its own once a working network is back.
+A full tunnel routes *everything* through the proxy, so leaving the tethering
+network must tear it down. The reachability probe doubles as the watchdog: it
+re-runs every ~8s, and the moment the proxy endpoint stops answering the rule no
+longer matches, so the tunnel stops and the proxy clears, restoring the direct
+route. It re-engages on its own once the proxy is reachable again. Crucially it
+reacts only to the *proxy endpoint* going away — never to ordinary packet loss —
+so a flaky link won't knock you off the tunnel.
 
 Notes:
 - TUN needs root, which is why the one-time helper/sudoers install exists.

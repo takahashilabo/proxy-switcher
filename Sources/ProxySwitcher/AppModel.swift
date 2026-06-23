@@ -20,20 +20,24 @@ final class AppModel: NSObject, ObservableObject {
     private let singbox = SingBoxConfigWriter()
     private let tunnel = TunnelManager()
 
-    /// The SSID we last applied settings for, so we don't re-apply (and re-prompt
-    /// for admin) on every poll tick.
-    private var lastAppliedSSID: String??  = .none
+    /// The match we last applied, keyed by profile id (.some(nil) = "proxy off"),
+    /// so we only re-apply (and re-touch the tunnel) when the effective rule
+    /// actually changes — not on every poll tick.
+    private var lastAppliedKey: UUID?? = .none
     private var applyGeneration = 0
 
-    // MARK: Tunnel watchdog state
+    /// The profile whose proxy endpoint is currently TCP-reachable on the LAN.
+    /// This is the robust matching signal for tethering rules (e.g. NetShare),
+    /// independent of whether macOS lets us read the Wi-Fi name. Updated by the
+    /// async reachability probe.
+    private var reachableProfileID: UUID?
+    /// True once the reachability probe has completed since the last network
+    /// change, so we never flip the proxy "off" before we've actually probed.
+    private var probedSinceChange = false
+
+    // MARK: Tunnel state
     /// Whether we currently have the TUN tunnel running.
     private var tunnelStarted = false
-    /// Consecutive failed connectivity probes while the tunnel is up.
-    private var probeFailures = 0
-    /// Set when the watchdog has emergency-stopped the tunnel because the network
-    /// went away. Prevents restarting it until real connectivity returns.
-    private var backedOff = false
-    private var watchdog: Timer?
 
     var profilesPath: String { store.path }
 
@@ -62,85 +66,12 @@ final class AppModel: NSObject, ObservableObject {
             try? tunnel.stop()
         }
 
-        // Initial evaluation.
+        // Initial evaluation. The WiFiMonitor's safety-net poll (every 8s) keeps
+        // re-driving this, which also re-runs the reachability probe — that's our
+        // ongoing safety net: if we leave a tethering network the probe goes
+        // unreachable and the tunnel/proxy is torn down. It never reacts to mere
+        // packet loss, only to the proxy endpoint becoming unreachable.
         handleSSID(monitor.currentSSID())
-
-        // Safety watchdog: if the tunnel is up but the internet is gone (e.g. we
-        // left the tethering network without the SSID change being detected),
-        // stop the tunnel so the machine isn't stranded with no connectivity.
-        let w = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.watchdogTick() }
-        }
-        RunLoop.main.add(w, forMode: .common)
-        watchdog = w
-    }
-
-    // MARK: - Tunnel watchdog
-
-    private func watchdogTick() {
-        // While backed off, keep probing; once the internet is back, re-evaluate.
-        if backedOff {
-            Task.detached {
-                let ok = await Self.probeInternet()
-                await MainActor.run {
-                    guard self.backedOff, ok else { return }
-                    self.backedOff = false
-                    self.probeFailures = 0
-                    self.forceReapply()
-                }
-            }
-            return
-        }
-
-        guard tunnelStarted else { probeFailures = 0; return }
-        Task.detached {
-            let ok = await Self.probeInternet()
-            await MainActor.run {
-                guard self.tunnelStarted, !self.backedOff else { return }
-                if ok {
-                    self.probeFailures = 0
-                } else {
-                    self.probeFailures += 1
-                    if self.probeFailures >= 2 { self.emergencyStopTunnel() }
-                }
-            }
-        }
-    }
-
-    /// Stop the tunnel and clear the system proxy to restore direct connectivity.
-    private func emergencyStopTunnel() {
-        probeFailures = 0
-        tunnelStarted = false
-        backedOff = true
-        lastError = "接続が失われたためトンネルを自動停止しました"
-        statusLine = "tunnel auto-stopped (no connectivity)"
-        // Don't let normal apply re-engage until the network actually changes.
-        lastAppliedSSID = .some(currentSSID)
-        let tunnel = self.tunnel
-        let proxy = self.proxy
-        let iface = monitor.interfaceName
-        Task.detached {
-            try? tunnel.stop()
-            try? proxy.apply(profile: nil, interface: iface)
-        }
-    }
-
-    /// Quick reachability check (~4s). Returns true if the internet is reachable
-    /// over whatever the current routing is.
-    nonisolated private static func probeInternet() async -> Bool {
-        var req = URLRequest(url: URL(string: "http://captive.apple.com/hotspot-detect.html")!)
-        req.timeoutInterval = 4
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 4
-        config.waitsForConnectivity = false
-        let session = URLSession(configuration: config)
-        do {
-            let (_, resp) = try await session.data(for: req)
-            return (resp as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
     }
 
     // MARK: - Profiles
@@ -151,45 +82,86 @@ final class AppModel: NSObject, ObservableObject {
         forceReapply()
     }
 
-    func profile(forSSID ssid: String?) -> ProxyProfile? {
-        guard let ssid else { return nil }
-        return profiles.first { $0.enabled && $0.ssid == ssid }
+    /// The rule that applies right now. A rule matches when its SSID equals the
+    /// current Wi-Fi name, OR — more robustly — when its proxy endpoint is
+    /// directly reachable on the LAN. The reachability fallback lets a tethering
+    /// rule (e.g. NetShare at 192.168.49.1:8282) engage even when macOS won't
+    /// surrender the Wi-Fi name, which is the usual reason auto-switching
+    /// silently did nothing.
+    func currentMatch() -> ProxyProfile? {
+        if let ssid = currentSSID,
+           let m = profiles.first(where: { $0.enabled && $0.ssid == ssid }) {
+            return m
+        }
+        if let rid = reachableProfileID,
+           let m = profiles.first(where: { $0.id == rid && $0.enabled }) {
+            return m
+        }
+        return nil
     }
 
-    var activeProfile: ProxyProfile? { profile(forSSID: currentSSID) }
+    var activeProfile: ProxyProfile? { currentMatch() }
 
     // MARK: - SSID handling
 
     private func handleSSID(_ ssid: String?) {
+        let changed = (currentSSID != ssid)
         currentSSID = ssid
         locationAuthorized = (location.authorizationStatus == .authorizedAlways
                               || location.authorizationStatus == .authorized)
-
-        // Only act when the SSID actually changed.
-        if case .some(let last) = lastAppliedSSID, last == ssid { return }
-        apply(forSSID: ssid)
+        // A genuine network change: re-probe before we'd consider turning off.
+        if changed { probedSinceChange = false }
+        refreshReachability()
     }
 
-    /// Re-apply regardless of whether the SSID changed (used after editing rules
-    /// or when the user picks "Apply now").
+    /// Re-probe the LAN for reachable proxy endpoints, then re-evaluate. Runs the
+    /// (blocking) socket probe off the main thread.
+    private func refreshReachability() {
+        let candidates = profiles.filter {
+            $0.enabled && $0.type.needsHostPort && Self.isIPv4($0.host)
+        }
+        Task.detached(priority: .utility) {
+            var found: UUID?
+            for p in candidates {
+                if TCPProbe.canConnect(host: p.host, port: p.port, timeout: 1.0) {
+                    found = p.id
+                    break
+                }
+            }
+            let reachable = found
+            await MainActor.run {
+                self.reachableProfileID = reachable
+                self.probedSinceChange = true
+                self.evaluate()
+            }
+        }
+    }
+
+    /// Apply the current match if it differs from what's already applied.
+    private func evaluate() {
+        let match = currentMatch()
+        // Don't flip the proxy off until we've actually probed reachability.
+        if match == nil && !probedSinceChange { return }
+        let key: UUID? = match?.id
+        if case .some(let last) = lastAppliedKey, last == key { return }
+        apply(match)
+    }
+
+    /// Re-apply unconditionally (used after editing rules or "Apply Now").
     func forceReapply() {
-        lastAppliedSSID = .none
-        apply(forSSID: currentSSID)
+        lastAppliedKey = .none
+        probedSinceChange = false
+        refreshReachability()
     }
 
-    private func apply(forSSID ssid: String?) {
-        // A real (re)apply means the situation changed — clear any back-off.
-        backedOff = false
-        probeFailures = 0
-
-        let match = profile(forSSID: ssid)
+    private func apply(_ match: ProxyProfile?) {
         let iface = monitor.interfaceName
-        lastAppliedSSID = .some(ssid)
+        lastAppliedKey = .some(match?.id)
 
         applyGeneration += 1
         let generation = applyGeneration
 
-        let netLabel = ssid ?? "no Wi-Fi"
+        let netLabel = currentSSID ?? match?.ssid ?? "no Wi-Fi"
         statusLine = "Applying \(match?.summary ?? "Off") for \(netLabel)…"
 
         let proxy = self.proxy
@@ -216,7 +188,6 @@ final class AppModel: NSObject, ObservableObject {
                 await MainActor.run {
                     guard generation == self.applyGeneration else { return }
                     self.tunnelStarted = didStart
-                    self.probeFailures = 0
                     if let match {
                         self.statusLine = "\(netLabel): \(match.summary)\(wantTunnel ? " +tunnel" : "")\(note)"
                     } else {
@@ -230,7 +201,7 @@ final class AppModel: NSObject, ObservableObject {
                     self.lastError = "\(error)"
                     self.statusLine = "\(netLabel): error"
                     // Allow another attempt next time.
-                    self.lastAppliedSSID = .none
+                    self.lastAppliedKey = .none
                 }
             }
         }
@@ -253,6 +224,14 @@ final class AppModel: NSObject, ObservableObject {
 
     private func refreshLoginItemState() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
+    }
+
+    /// True if the string is a literal IPv4 address (so it's probe-able and safe
+    /// to treat as a fixed LAN endpoint).
+    static func isIPv4(_ s: String) -> Bool {
+        let parts = s.split(separator: ".")
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { Int($0).map { $0 >= 0 && $0 <= 255 } ?? false }
     }
 }
 
