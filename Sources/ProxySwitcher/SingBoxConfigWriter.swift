@@ -76,7 +76,10 @@ struct SingBoxConfigWriter {
                 // which otherwise stall large/streaming transfers (Apple Music,
                 // Claude streaming, LINE media) while small requests still work.
                 "mtu": 1280,
-                "stack": "gvisor",
+                // "system" stack uses the OS network stack and is noticeably
+                // faster than the userspace "gvisor" stack. (If apps start
+                // misbehaving on this tethered link, revert to "gvisor".)
+                "stack": "system",
             ]],
             "outbounds": [
                 outbound,
