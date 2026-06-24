@@ -41,6 +41,9 @@ struct MenuView: View {
         Button("Apply Now") { model.forceReapply() }
             .keyboardShortcut("r")
 
+        Button("Turn Proxy Off Now (emergency)") { model.disableNow() }
+            .keyboardShortcut("d")
+
         Button("Settings…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "settings")

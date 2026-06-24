@@ -34,6 +34,10 @@ final class AppModel: NSObject, ObservableObject {
     /// True once the reachability probe has completed since the last network
     /// change, so we never flip the proxy "off" before we've actually probed.
     private var probedSinceChange = false
+    /// Set by the emergency "Turn Proxy Off Now" override. While set, auto-apply
+    /// is suppressed so the proxy stays off — until the network actually changes
+    /// (or the user picks "Apply Now").
+    private var suppressed = false
 
     // MARK: Tunnel state
     /// Whether we currently have the TUN tunnel running.
@@ -110,6 +114,7 @@ final class AppModel: NSObject, ObservableObject {
         let changed = (currentSSID != ssid)
         if changed {
             ActivityLog.shared.log("wifi name: \(currentSSID ?? "nil") → \(ssid ?? "nil")")
+            suppressed = false
         }
         currentSSID = ssid
         locationAuthorized = (location.authorizationStatus == .authorizedAlways
@@ -142,6 +147,7 @@ final class AppModel: NSObject, ObservableObject {
                     let name = reachable
                         .flatMap { id in self.profiles.first { $0.id == id }?.ssid } ?? "none"
                     ActivityLog.shared.log("reachable proxy → \(name) (probed \(candidates.count) endpoint(s))")
+                    self.suppressed = false
                 }
                 self.evaluate()
             }
@@ -150,6 +156,8 @@ final class AppModel: NSObject, ObservableObject {
 
     /// Apply the current match if it differs from what's already applied.
     private func evaluate() {
+        // Emergency override active: stay off until the network changes.
+        if suppressed { return }
         let match = currentMatch()
         // Don't flip the proxy off until we've actually probed reachability.
         if match == nil && !probedSinceChange { return }
@@ -160,9 +168,35 @@ final class AppModel: NSObject, ObservableObject {
 
     /// Re-apply unconditionally (used after editing rules or "Apply Now").
     func forceReapply() {
+        suppressed = false
         lastAppliedKey = .none
         probedSinceChange = false
         refreshReachability()
+    }
+
+    /// Emergency override: immediately clear the proxy and stop the tunnel,
+    /// restoring the direct route. Works with no network (menu bar only), so it
+    /// rescues a stranded machine if a network change was ever missed. Stays off
+    /// until the network changes or the user picks "Apply Now".
+    func disableNow() {
+        ActivityLog.shared.log("MANUAL disable requested")
+        suppressed = true
+        lastAppliedKey = .some(nil)
+        applyGeneration += 1
+        statusLine = "Disabling…"
+        let proxy = self.proxy
+        let tunnel = self.tunnel
+        let iface = monitor.interfaceName
+        Task.detached(priority: .userInitiated) {
+            try? proxy.apply(profile: nil, interface: iface)
+            try? tunnel.stop()
+            ActivityLog.shared.log("MANUAL disable done (proxy off, tunnel stopped)")
+            await MainActor.run {
+                self.tunnelStarted = false
+                self.statusLine = "Proxy off (manual override)"
+                self.lastError = nil
+            }
+        }
     }
 
     private func apply(_ match: ProxyProfile?) {
