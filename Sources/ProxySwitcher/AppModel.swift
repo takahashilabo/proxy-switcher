@@ -66,6 +66,8 @@ final class AppModel: NSObject, ObservableObject {
             try? tunnel.stop()
         }
 
+        ActivityLog.shared.log("=== launched; \(profiles.count) rule(s); location=\(locationAuthorized) ===")
+
         // Initial evaluation. The WiFiMonitor's safety-net poll (every 8s) keeps
         // re-driving this, which also re-runs the reachability probe — that's our
         // ongoing safety net: if we leave a tethering network the probe goes
@@ -106,6 +108,9 @@ final class AppModel: NSObject, ObservableObject {
 
     private func handleSSID(_ ssid: String?) {
         let changed = (currentSSID != ssid)
+        if changed {
+            ActivityLog.shared.log("wifi name: \(currentSSID ?? "nil") → \(ssid ?? "nil")")
+        }
         currentSSID = ssid
         locationAuthorized = (location.authorizationStatus == .authorizedAlways
                               || location.authorizationStatus == .authorized)
@@ -130,8 +135,14 @@ final class AppModel: NSObject, ObservableObject {
             }
             let reachable = found
             await MainActor.run {
+                let changed = (self.reachableProfileID != reachable)
                 self.reachableProfileID = reachable
                 self.probedSinceChange = true
+                if changed {
+                    let name = reachable
+                        .flatMap { id in self.profiles.first { $0.id == id }?.ssid } ?? "none"
+                    ActivityLog.shared.log("reachable proxy → \(name) (probed \(candidates.count) endpoint(s))")
+                }
                 self.evaluate()
             }
         }
@@ -168,6 +179,7 @@ final class AppModel: NSObject, ObservableObject {
         let singbox = self.singbox
         let tunnel = self.tunnel
         let wantTunnel = (match.map { $0.useTunnel && SingBoxConfigWriter.supportsTunnel($0) }) ?? false
+        ActivityLog.shared.log("APPLY \(match?.summary ?? "OFF")\(wantTunnel ? " +tunnel" : "") for \(netLabel)")
         Task.detached(priority: .userInitiated) {
             do {
                 try proxy.apply(profile: match, interface: iface)
@@ -177,10 +189,11 @@ final class AppModel: NSObject, ObservableObject {
                 var started = false
                 if wantTunnel, let m = match {
                     singbox.write(profile: m)
-                    do { try tunnel.start(); started = true }
-                    catch { tunnelNote = " (tunnel: \(error))" }
+                    do { try tunnel.start(); started = true; ActivityLog.shared.log("tunnel started") }
+                    catch { tunnelNote = " (tunnel: \(error))"; ActivityLog.shared.log("tunnel start FAILED: \(error)") }
                 } else {
                     try? tunnel.stop()
+                    ActivityLog.shared.log("tunnel stopped")
                 }
 
                 let note = tunnelNote
@@ -196,6 +209,7 @@ final class AppModel: NSObject, ObservableObject {
                     self.lastError = note.isEmpty ? nil : String(note.dropFirst())
                 }
             } catch {
+                ActivityLog.shared.log("APPLY ERROR: \(error)")
                 await MainActor.run {
                     guard generation == self.applyGeneration else { return }
                     self.lastError = "\(error)"
