@@ -124,34 +124,27 @@ final class AppModel: NSObject, ObservableObject {
         refreshReachability()
     }
 
-    /// Re-probe the LAN for reachable proxy endpoints, then re-evaluate. Runs the
-    /// (blocking) socket probe off the main thread.
+    /// Re-check which rule's proxy is on the physically-connected link, then
+    /// re-evaluate. This inspects the Wi-Fi interface's own address (a fast,
+    /// local syscall that the TUN tunnel cannot fake), so it's synchronous and
+    /// race-free — and, crucially, never fooled by our own tunnel into thinking
+    /// a left-behind network is still reachable.
     private func refreshReachability() {
-        let candidates = profiles.filter {
+        let iface = monitor.interfaceName
+        let prev = reachableProfileID
+        reachableProfileID = profiles.first {
             $0.enabled && $0.type.needsHostPort && Self.isIPv4($0.host)
+                && LinkProbe.hostOnLocalSubnet($0.host, interface: iface)
+        }?.id
+        probedSinceChange = true
+
+        if reachableProfileID != prev {
+            let name = reachableProfileID
+                .flatMap { id in profiles.first { $0.id == id }?.ssid } ?? "none"
+            ActivityLog.shared.log("on-link proxy → \(name)")
+            suppressed = false
         }
-        Task.detached(priority: .utility) {
-            var found: UUID?
-            for p in candidates {
-                if TCPProbe.canConnect(host: p.host, port: p.port, timeout: 1.0) {
-                    found = p.id
-                    break
-                }
-            }
-            let reachable = found
-            await MainActor.run {
-                let changed = (self.reachableProfileID != reachable)
-                self.reachableProfileID = reachable
-                self.probedSinceChange = true
-                if changed {
-                    let name = reachable
-                        .flatMap { id in self.profiles.first { $0.id == id }?.ssid } ?? "none"
-                    ActivityLog.shared.log("reachable proxy → \(name) (probed \(candidates.count) endpoint(s))")
-                    self.suppressed = false
-                }
-                self.evaluate()
-            }
-        }
+        evaluate()
     }
 
     /// Apply the current match if it differs from what's already applied.
